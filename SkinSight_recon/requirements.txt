@@ -1,0 +1,29 @@
+numpy==1.26.1
+Pillow
+huggingface_hub
+einops
+safetensors
+opencv-python
+einops
+matplotlib
+utils3d
+pypose
+trimesh
+safetensors
+numba==0.61.2
+plyfile
+
+onnxruntime
+pyparsing
+importlib_metadata
+
+xformers == 0.0.28.post3
+faiss-gpu
+pandas
+prettytable
+pytorch-lightning
+pytorch-metric-learning
+torchmetrics
+
+# pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
+
