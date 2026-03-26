@@ -52,6 +52,7 @@ Download all required pre-trained weights
 (including VGGT, Pi3, and MapAnything by default):
 
 ```bash
+cd SkinSight_recon
 bash ./scripts/download_weights.sh
 ```
 
