@@ -219,9 +219,9 @@ def trans_process(queue4, queue5, pcd_dir, config):
         data2["world_points"] = apply_sim3_direct(data2["world_points"], s, R, t)
         if task["idx"] == 1:
             path = save_aligned_data(data1, 0, pcd_dir, config)
-            zmq_socket.send_json({"path": path})
+            zmq_socket.send_pyobj({"path": path})
         path = save_aligned_data(data2, task["idx"], pcd_dir, config)
-        zmq_socket.send_json({"path": path})
+        zmq_socket.send_pyobj({"path": path})
         for s in shm_refs1 + shm_refs2:
             s.close() 
         queue5.put({
@@ -433,8 +433,12 @@ class SkinSightRecon:
         chunk_shm_lst = []
         shm_obj_lst = []
 
-        #with open(os.path.join(self.output_dir, "sim3res.txt"), "xt") as temp:
-        #    temp.write("\n".join([str(x) for x in self.sim3_list]))
+        # test
+        np.save(os.path.join(self.output_dir, "camera_poses.npy"), {
+            "poses": self.all_camera_poses,
+            "intrinsics": self.all_camera_intrinsics,
+            "alignment": self.sim3_list
+        })
 
         self.save_camera_poses()
         
