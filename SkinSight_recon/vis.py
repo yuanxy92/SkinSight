@@ -19,7 +19,7 @@ def display_zmq_stream(addr="tcp://localhost:7777"):
 
     while vis.poll_events():
         try:
-            message = socket.recv_json(flags=zmq.NOBLOCK)
+            message = socket.recv_pyobj(flags=zmq.NOBLOCK)
             path = message["path"]
             p = o3d.io.read_point_cloud(path)
             if not p.is_empty():
