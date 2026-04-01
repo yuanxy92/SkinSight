@@ -203,27 +203,48 @@ def save_aligned_data(aligned_chunk_data, chunk_idx, pcd_dir, config):
     )
     return ply_path
 
+def transform_c2w(c2w, srt):
+    s, R, t = srt
+    S = np.eye(4)
+    S[:3, :3] = s * R
+    S[:3, 3] = t
+    transformed_c2w = S @ c2w
+    transformed_c2w[:3, :3] /= s
+    return transformed_c2w
+
+
 import zmq
 
 def trans_process(queue4, queue5, pcd_dir, config):
     print("Transform process start")
     zmq_context = zmq.Context()
     zmq_socket = zmq_context.socket(zmq.PUB)
-    zmq_socket.bind("tcp://localhost:7777")
+    zmq_socket.bind("tcp://localhost:1337")
 
     while True:
         task = queue4.get()
+        if task["idx"] == 0:
+            data, shm_refs = unpack_shm(task["data"])
+            path = save_aligned_data(data, 0, pcd_dir, config)
+            zmq_socket.send_pyobj({
+                "path": path,
+                "extrinsics": data["extrinsic"]
+            })
+            for shm in shm_refs:
+                shm.close()
+            continue
+
         data1, shm_refs1 = unpack_shm(task["data1"])
         data2, shm_refs2 = unpack_shm(task["data2"])
         s, R, t = task["srt"]
         data2["world_points"] = apply_sim3_direct(data2["world_points"], s, R, t)
-        if task["idx"] == 1:
-            path = save_aligned_data(data1, 0, pcd_dir, config)
-            zmq_socket.send_pyobj({"path": path})
         path = save_aligned_data(data2, task["idx"], pcd_dir, config)
-        zmq_socket.send_pyobj({"path": path})
-        for s in shm_refs1 + shm_refs2:
-            s.close() 
+        zmq_socket.send_pyobj({
+            "path": path,
+            "extrinsics": [transform_c2w(c2w, (s, R, t)) for c2w in data2["extrinsic"]]
+        })
+        for shm in shm_refs1 + shm_refs2:
+            shm.close() 
         queue5.put({
             "srt": task["srt"],
             "idx": task["idx"],
@@ -395,8 +416,14 @@ class SkinSightRecon:
             chunk_shm, shm_objs = pack_shm(chunk)
             chunk_shm_lst.append(chunk_shm)
             shm_obj_lst += shm_objs
-            # 第2个chunk开始向进程发送任务
-            if chunk_idx >= 1:
+            # 第1个chunk直接保存，第2个chunk开始向align进程发送任务
+            if chunk_idx == 0:
+                task = {
+                    "data": chunk_shm,
+                    "idx": 0
+                }
+                queue4.put(task)
+            else:
                 chunk_shm_data1 = chunk_shm_lst[chunk_idx-1]
                 chunk_shm_data2 = chunk_shm
                 task = {
@@ -612,10 +639,11 @@ def copy_file(src_path, dst_dir):
         print(f"Copy Error: {e}")
 
 if __name__ == '__main__':
-    # python skinsight_recon_test.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
+    # Without Visualization
+    # python skinsight_recon_new.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
 
-    # 带可视化
-    # python vis.py & python skinsight_recon_test.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
+    # With Visualization
+    # python vis.py & python skinsight_recon_new.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--image_dir', type=str, required=True,
