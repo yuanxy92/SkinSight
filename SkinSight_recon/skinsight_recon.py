@@ -115,35 +115,31 @@ def unpack_shm(shm_metadata):
 
 
 def compute_alignment(chunk_data1, chunk_data2, overlap, config):
-# 提取两个分块在重叠区域（Overlap）的点云和置信度
-            point_map1 = chunk_data1['world_points'][-overlap:]
-            point_map2 = chunk_data2['world_points'][:overlap]
-            conf1 = chunk_data1['world_points_conf'][-overlap:]
-            conf2 = chunk_data2['world_points_conf'][:overlap]
+    point_map1 = chunk_data1['world_points'][-overlap:]
+    point_map2 = chunk_data2['world_points'][:overlap]
+    conf1 = chunk_data1['world_points_conf'][-overlap:]
+    conf2 = chunk_data2['world_points_conf'][:overlap]
 
-            # 如果存在掩码（如天空掩码），则在对齐时考虑掩码
-            mask = None
-            if chunk_data1["mask"] is not None:
-                mask1 = chunk_data1["mask"][-overlap:]
-                mask2 = chunk_data2["mask"][:overlap]
-                mask = mask1.squeeze() & mask2.squeeze()
+    mask = None
+    if chunk_data1["mask"] is not None:
+        mask1 = chunk_data1["mask"][-overlap:]
+        mask2 = chunk_data2["mask"][:overlap]
+        mask = mask1.squeeze() & mask2.squeeze()
 
-            # 根据置信度中值设置过滤阈值，剔除低质量点
-            if config['Model']['Pointcloud_Save'].get('use_conf_filter', True):
-                conf_threshold = min(np.median(conf1), np.median(conf2)) * 0.1
-            else:
-                conf_threshold = -1.0
-            
-            # 使用加权 Umeyama 算法计算 Sim3 变换（缩放 s, 旋转 R, 平移 t）
-            s, R, t = weighted_align_point_maps(point_map1, 
-                                                conf1, 
-                                                point_map2, 
-                                                conf2,
-                                                mask,
-                                                conf_threshold=conf_threshold,
-                                                config=config)
-            
-            return s, R, t
+    if config['Model']['Pointcloud_Save'].get('use_conf_filter', True):
+        conf_threshold = min(np.median(conf1), np.median(conf2)) * 0.1
+    else:
+        conf_threshold = -1.0
+    
+    s, R, t = weighted_align_point_maps(point_map1, 
+                                        conf1, 
+                                        point_map2, 
+                                        conf2,
+                                        mask,
+                                        conf_threshold=conf_threshold,
+                                        config=config)
+    
+    return s, R, t
 
 
 def alignment_process(queue1, queue2, overlap, config):
@@ -250,10 +246,6 @@ def trans_process(queue4, queue5, pcd_dir, config):
             "idx": task["idx"],
         })
         
-        
-
-
-        
 
 class LongSeqResult:
     def __init__(self):
@@ -302,20 +294,8 @@ class SkinSightRecon:
             raise ValueError(f"Unsupported model: {self.config['Weights']['model']}. ")
 
         self.skyseg_session = None
-        
         self.chunk_indices = None # [(begin_idx, end_idx), ...]
-
-        self.loop_list = [] # e.g. [(1584, 139), ...]
-
-        self.loop_optimizer = Sim3LoopOptimizer(self.config)
-
         self.sim3_list = [] # [(s [1,], R [3,3], T [3,]), ...]
-
-        self.loop_sim3_list = [] # [(chunk_idx_a, chunk_idx_b, s [1,], R [3,3], T [3,]), ...]
-
-        self.loop_predict_list = []
-
-        self.loop_enable = self.config['Model']['loop_enable']
 
         print('init done.')
 
@@ -327,8 +307,6 @@ class SkinSightRecon:
             chunk_image_paths += self.img_list[start_idx:end_idx]
 
         predictions = self.model.infer_chunk(chunk_image_paths)
-
-        
 
         for key in predictions.keys():
             if isinstance(predictions[key], torch.Tensor):
@@ -355,11 +333,6 @@ class SkinSightRecon:
             self.all_camera_intrinsics.append((chunk_range, intrinsics))
 
         predictions['depth'] = np.squeeze(predictions['depth'])
-
-        #np.save(save_path, predictions)
-        
-        #return predictions if is_loop or range_2 is not None else None
-
         return predictions
     
     def process_long_sequence(self):
@@ -379,17 +352,16 @@ class SkinSightRecon:
                 end_idx = min(start_idx + self.chunk_size, len(self.img_list))
                 self.chunk_indices.append((start_idx, end_idx))
 
-        # --- 顺序推理同时计算对齐 ---
-        chunk_lst = [] # 主线程里使用的chunk
-        chunk_shm_lst = [] # 被复制到共享内存的chunk的标识符
-        shm_obj_lst = [] # 共享内存对象
+        chunk_lst = [] # chunk for main thread
+        chunk_shm_lst = [] # chunk in shared memory
+        shm_obj_lst = [] # objects in shared memory
         
-        queue1 = Queue() # 输入相邻chunk
-        queue2 = Queue() # 输出相邻变换
+        queue1 = Queue() # queue for alignment process to receive tasks (chunk pairs)
+        queue2 = Queue() # queue for outputting adjacent transformations
         
-        queue3 = Queue() # 排序
-        queue4 = Queue() # 累积
-        queue5 = Queue() # 变换并保存并广播
+        queue3 = Queue() # queue for sorting
+        queue4 = Queue() # queue for accumulation
+        queue5 = Queue() # queue for transformation, saving, and broadcasting
 
 
         process_align_num = 3
@@ -408,15 +380,15 @@ class SkinSightRecon:
         for chunk_idx in range(len(self.chunk_indices)):
             print(f'[Progress]: {chunk_idx}/{len(self.chunk_indices)-1}')
             start = time.perf_counter()
-            # 处理单个chunk
+            # processing singel chunk
             chunk = self.process_single_chunk(self.chunk_indices[chunk_idx], chunk_idx=chunk_idx)
             torch.cuda.empty_cache()
             chunk_lst.append(chunk)
-            # 复制到共享内存
+            # copy to shared memory and send to align process
             chunk_shm, shm_objs = pack_shm(chunk)
             chunk_shm_lst.append(chunk_shm)
             shm_obj_lst += shm_objs
-            # 第1个chunk直接保存，第2个chunk开始向align进程发送任务
+            # save the first chunk directly, start sending tasks to align process from the second chunk
             if chunk_idx == 0:
                 task = {
                     "data": chunk_shm,
@@ -434,7 +406,7 @@ class SkinSightRecon:
                 queue1.put(task)
             end = time.perf_counter()
             print(f"Chunk {chunk_idx} processed in {end - start:.2f} seconds")
-        # 清理torch内存
+        # clean the cache 
         del self.model 
         torch.cuda.empty_cache()
 
@@ -449,7 +421,7 @@ class SkinSightRecon:
         end = time.perf_counter()
         print(f"Alignment and Transformation processed in {end - start:.2f} seconds")
 
-        # 清理线程与共享内存
+        # clean up threads and shared memory
         for process in process_align_lst: process.terminate()
         process_sort.terminate()
         process_accum.terminate()
