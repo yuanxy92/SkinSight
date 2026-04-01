@@ -5,9 +5,7 @@ Code and data for **SkinSight**.
 This project is built upon the excellent work of [**VGGT-Long**](https://github.com/DengKaiCQ/VGGT-Long).  
 We gratefully acknowledge the authors for making their code publicly available.
 
-https://github.com/yuanxy92/SkinSight/blob/main/Assets/skinsight_screen_recording.mp4
-
-[Video](Assets/skinsight_screen_recording.mp4)
+[Video](https://raw.githubusercontent.com/yuanxy92/SkinSight/refs/heads/main/Assets/skinsight_screen_recording.mp4)
 
 ---
 
