@@ -5,6 +5,8 @@ Code and data for **SkinSight**.
 This project is built upon the excellent work of [**VGGT-Long**](https://github.com/DengKaiCQ/VGGT-Long).  
 We gratefully acknowledge the authors for making their code publicly available.
 
+https://github.com/yuanxy92/SkinSight/blob/main/Assets/skinsight_screen_recording.mp4
+
 ---
 
 ## Setup, Installation & Running
@@ -17,6 +19,7 @@ This project has been developed and tested under the following environment:
 CPU(s): Intel Core i7-14700K / Intel Core i9-13900  
 GPU(s): NVIDIA RTX 4090 (24 GiB VRAM)  
 RAM: 64 GB  
+OS: Ubuntu
 ```
 
 ---
@@ -71,7 +74,15 @@ python setup.py install
 Run inference with:
 
 ```bash
-python skinsight_recon.py --image_dir ./path_of_images
+# Without Visualization
+python skinsight_recon.py \
+  --image_dir path_of_images \
+  --save_dir path_of_saving_results
+
+# With Visualization
+python vis.py & python skinsight_recon.py \
+  --image_dir path_of_images \
+  --save_dir path_of_saving_results
 ```
 
 ---
@@ -87,8 +98,16 @@ configs/base_config.yaml
 To use a custom configuration file:
 
 ```bash
+# Without Visualization
 python skinsight_recon.py \
-  --image_dir ./path_of_images \
+  --image_dir path_of_images \
+  --save_dir path_of_saving_results \
+  --config ./configs/base_config.yaml
+
+# With Visualization
+python vis.py & python skinsight_recon_new.py \
+  --image_dir path_of_images \
+  --save_dir path_of_saving_results \
   --config ./configs/base_config.yaml
 ```
 
@@ -98,7 +117,6 @@ python skinsight_recon.py \
 
 - Ensure all required weights are downloaded before running the code.
 - For large-scale experiments, a GPU with sufficient VRAM (≥24 GB recommended) is preferred.
-- Configuration files can be duplicated and modified to explore different parameter settings.
 
 ---
 

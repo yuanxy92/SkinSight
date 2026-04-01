@@ -146,8 +146,8 @@ def compute_alignment(chunk_data1, chunk_data2, overlap, config):
             return s, R, t
 
 
-def alignment_process(queue1, queue2):
-    print("Alignment 进程启动")
+def alignment_process(queue1, queue2, overlap, config):
+    print("Align process start")
     f = open(os.devnull, 'w')
     sys.stdout = f
     sys.stderr = f
@@ -155,13 +155,104 @@ def alignment_process(queue1, queue2):
         task = queue1.get()
         data1, shm_refs1 = unpack_shm(task["data1"])
         data2, shm_refs2 = unpack_shm(task["data2"])
-        result = compute_alignment(data1, data2, task["overlap"], task["config"])
+        result = compute_alignment(data1, data2, overlap, config)
         for s in shm_refs1 + shm_refs2:
             s.close() 
         queue2.put({
+            "data1": task["data1"],
+            "data2": task["data2"],
             "srt": result,
-            "idx": task["idx"]
+            "idx": task["idx"],
         })
+
+def sort_process(queue2, queue3):
+    print("Sort process start")
+    next = 1
+    current = []
+    while True:
+        task = queue2.get()
+        current.append(task)
+        if any(task["idx"] == next for task in current):
+            queue3.put([task for task in current if task["idx"] == next][0])
+            next += 1
+        current = [task for task in current if task["idx"] != next]
+
+def accum_process(queue3, queue4):
+    print("Accumulate process start")
+    current_srt = None
+    while True:
+        task = queue3.get()
+        if current_srt != None:
+            task["srt"] = accumulate_sim3_transforms([current_srt, task["srt"]])[1]
+        current_srt = task["srt"]
+        queue4.put(task)
+        
+def save_aligned_data(aligned_chunk_data, chunk_idx, pcd_dir, config):
+    points = aligned_chunk_data['world_points'].reshape(-1, 3)
+    colors = (aligned_chunk_data['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
+    confs = aligned_chunk_data['world_points_conf'].reshape(-1)
+    ply_path = os.path.join(pcd_dir, f'{chunk_idx + 1}_pcd.ply')
+    save_confident_pointcloud_batch(
+        points=points,
+        colors=colors,
+        confs=confs,
+        output_path=ply_path,
+        conf_threshold=(np.mean(confs) * config['Model']['Pointcloud_Save']['conf_threshold_coef']
+            if config['Model']['Pointcloud_Save'].get('use_conf_filter', True) else -1.0),
+        sample_ratio=config['Model']['Pointcloud_Save']['sample_ratio']
+    )
+    return ply_path
+
+def transform_c2w(c2w, srt):
+    s, R, t = srt
+    S = np.eye(4)
+    S[:3, :3] = s * R
+    S[:3, 3] = t
+    transformed_c2w = S @ c2w
+    transformed_c2w[:3, :3] /= s
+    return transformed_c2w
+
+
+import zmq
+
+def trans_process(queue4, queue5, pcd_dir, config):
+    print("Transform process start")
+    zmq_context = zmq.Context()
+    zmq_socket = zmq_context.socket(zmq.PUB)
+    zmq_socket.bind("tcp://localhost:1337")
+
+    while True:
+        task = queue4.get()
+        if task["idx"] == 0:
+            data, shm_refs = unpack_shm(task["data"])
+            path = save_aligned_data(data, 0, pcd_dir, config)
+            zmq_socket.send_pyobj({
+                "path": path,
+                "extrinsics": data["extrinsic"]
+            })
+            for shm in shm_refs:
+                shm.close()
+            continue
+
+        data1, shm_refs1 = unpack_shm(task["data1"])
+        data2, shm_refs2 = unpack_shm(task["data2"])
+        s, R, t = task["srt"]
+        data2["world_points"] = apply_sim3_direct(data2["world_points"], s, R, t)
+        path = save_aligned_data(data2, task["idx"], pcd_dir, config)
+        zmq_socket.send_pyobj({
+            "path": path,
+            "extrinsics": [transform_c2w(c2w, (s, R, t)) for c2w in data2["extrinsic"]]
+        })
+        for shm in shm_refs1 + shm_refs2:
+            shm.close() 
+        queue5.put({
+            "srt": task["srt"],
+            "idx": task["idx"],
+        })
+        
+        
+
+
         
 
 class LongSeqResult:
@@ -295,9 +386,24 @@ class SkinSightRecon:
         
         queue1 = Queue() # 输入相邻chunk
         queue2 = Queue() # 输出相邻变换
+        
+        queue3 = Queue() # 排序
+        queue4 = Queue() # 累积
+        queue5 = Queue() # 变换并保存并广播
+
+
         process_align_num = 3
-        process_align_lst = [Process(target=alignment_process, args=(queue1, queue2)) for _ in range(process_align_num)]
+        process_align_lst = [Process(target=alignment_process, args=(queue1, queue2, self.overlap, self.config)) for _ in range(process_align_num)]
         for process in process_align_lst: process.start()
+
+        process_sort = Process(target=sort_process, args=(queue2, queue3))
+        process_sort.start()
+
+        process_accum = Process(target=accum_process, args=(queue3, queue4))
+        process_accum.start()
+
+        process_trans = Process(target=trans_process, args=(queue4, queue5, self.pcd_dir, self.config))
+        process_trans.start()
 
         for chunk_idx in range(len(self.chunk_indices)):
             print(f'[Progress]: {chunk_idx}/{len(self.chunk_indices)-1}')
@@ -310,19 +416,22 @@ class SkinSightRecon:
             chunk_shm, shm_objs = pack_shm(chunk)
             chunk_shm_lst.append(chunk_shm)
             shm_obj_lst += shm_objs
-            # 第2个chunk开始向进程发送任务
-            if chunk_idx >= 1:
+            # 第1个chunk直接保存，第2个chunk开始向align进程发送任务
+            if chunk_idx == 0:
+                task = {
+                    "data": chunk_shm,
+                    "idx": 0
+                }
+                queue4.put(task)
+            else:
                 chunk_shm_data1 = chunk_shm_lst[chunk_idx-1]
                 chunk_shm_data2 = chunk_shm
                 task = {
                     "data1": chunk_shm_data1,
                     "data2": chunk_shm_data2,
-                    "overlap": self.overlap,
-                    "config": self.config,
                     "idx": chunk_idx
                 }
                 queue1.put(task)
-
             end = time.perf_counter()
             print(f"Chunk {chunk_idx} processed in {end - start:.2f} seconds")
         # 清理torch内存
@@ -332,89 +441,35 @@ class SkinSightRecon:
         start = time.perf_counter()
         res_lst = []
         for i in range(len(self.chunk_indices) - 1):
-            res = queue2.get()
+            res = queue5.get()
             res_lst.append(res)
-            print(f"Alignment {res['idx']} processed")
-        res_lst.sort(key=lambda res: res["idx"])
+            print(f"Alignment and Transformation {res['idx']} processed")
+
         self.sim3_list = [res["srt"] for res in res_lst]
         end = time.perf_counter()
-        print(f"Alignment processed in {end - start:.2f} seconds")
+        print(f"Alignment and Transformation processed in {end - start:.2f} seconds")
 
         # 清理线程与共享内存
         for process in process_align_lst: process.terminate()
+        process_sort.terminate()
+        process_accum.terminate()
+        process_trans.terminate()
         for shm in shm_obj_lst:
             shm.close()
             shm.unlink()
         chunk_shm_lst = []
         shm_obj_lst = []
 
+        # test
+        np.save(os.path.join(self.output_dir, "camera_poses.npy"), {
+            "poses": self.all_camera_poses,
+            "intrinsics": self.all_camera_intrinsics,
+            "alignment": self.sim3_list
+        })
 
-        # --- 应用变换并保存结果 ---
-        print('Apply alignment')
-        # 将局部 Sim3 变换累加，得到各分块相对于第一块的全局变换矩阵
-        self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
-
-        with open(os.path.join(self.output_dir, "sim3res.txt"), "xt") as temp:
-            temp.write("\n".join([str(x) for x in self.sim3_list]))
-
-        for chunk_idx in range(len(self.chunk_indices) - 1):
-            print(f'Applying {chunk_idx + 1} -> {chunk_idx} (Total {len(self.chunk_indices) - 1})')
-            s, R, t = self.sim3_list[chunk_idx]
-
-            # 加载待对齐的分块数据
-            chunk_data = chunk_lst[chunk_idx + 1]
-
-            # 对该块的所有 3D 世界坐标点应用 Sim3 变换
-            chunk_data['world_points'] = apply_sim3_direct(chunk_data['world_points'], s, R, t)
-
-            # 保存对齐后的结果
-            #aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx + 1}.npy")
-            #np.save(aligned_path, chunk_data)
-
-            # 特殊处理：保存第一个分块（它是参考坐标系，无需变换）
-            if chunk_idx == 0:
-                chunk_data_first = chunk_lst[0]
-                #np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
-
-                # 将第一个块转换为 PLY 点云文件保存
-                points_first = chunk_data_first['world_points'].reshape(-1, 3)
-                colors_first = (chunk_data_first['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
-                confs_first = chunk_data_first['world_points_conf'].reshape(-1)
-                ply_path_first = os.path.join(self.pcd_dir, f'0_pcd.ply')
-                save_confident_pointcloud_batch(
-                    points=points_first,
-                    colors=colors_first,
-                    confs=confs_first,
-                    output_path=ply_path_first,
-                    conf_threshold=(np.mean(confs_first) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef']
-                        if self.config['Model']['Pointcloud_Save'].get('use_conf_filter', True) else -1.0),
-                    sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio']
-                )
-
-            # 将后续对齐的分块转换为 PLY 点云文件保存
-            #aligned_chunk_data = np.load(os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy"),
-            #                                 allow_pickle=True).item() if chunk_idx > 0 else chunk_data_first
-            #aligned_chunk_data = np.load(os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy"), allow_pickle=True).item()
-            aligned_chunk_data = chunk_data
-
-            points = aligned_chunk_data['world_points'].reshape(-1, 3)
-            colors = (aligned_chunk_data['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
-            confs = aligned_chunk_data['world_points_conf'].reshape(-1)
-            ply_path = os.path.join(self.pcd_dir, f'{chunk_idx + 1}_pcd.ply')
-            save_confident_pointcloud_batch(
-                points=points,
-                colors=colors,
-                confs=confs,
-                output_path=ply_path,
-                conf_threshold=(np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef']
-                    if self.config['Model']['Pointcloud_Save'].get('use_conf_filter', True) else -1.0),
-                sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio']
-            )
-
-        # 保存相机轨迹位姿
         self.save_camera_poses()
         
-        print('Done.')
+        print('Process_long_sequence done.')
 
     def run(self):
         print(f"Loading images from {self.img_dir}...")
@@ -584,10 +639,17 @@ def copy_file(src_path, dst_dir):
         print(f"Copy Error: {e}")
 
 if __name__ == '__main__':
-    # python skinsight_recon.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
+    # Without Visualization
+    # python skinsight_recon_new.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
+
+    # With Visualization
+    # python vis.py & python skinsight_recon_new.py --image_dir ../data/fig3 --config ./configs/base_config.yaml
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--image_dir', type=str, required=True,
                         help='Image path')
+    parser.add_argument('--save_dir', type=str, required=True,
+                        help='Save path')
     parser.add_argument('--config', type=str, required=False, default='./configs/base_config.yaml',
                         help='config path')
     args = parser.parse_args()
@@ -595,11 +657,9 @@ if __name__ == '__main__':
     config = load_config(args.config)
 
     image_dir = args.image_dir
+    save_dir = args.save_dir
     path = image_dir.split("/")
-    current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-
-    save_dir = '../Results/'
-    
+    current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")    
 
     if not os.path.exists(save_dir): 
         os.makedirs(save_dir)
@@ -620,6 +680,8 @@ if __name__ == '__main__':
     all_ply_path = os.path.join(save_dir, f'pcd/combined_pcd.ply')
     input_dir = os.path.join(save_dir, f'pcd')
     print("Saving all the point clouds")
+    if os.path.isfile(all_ply_path):
+        os.remove(all_ply_path)
     merge_ply_files(input_dir, all_ply_path)
     print('All done.')
     sys.exit()
