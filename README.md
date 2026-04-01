@@ -71,6 +71,8 @@ python setup.py install
 
 ### 🚀 3. Running the Code
 
+Prepare your own data, or download example data [here](https://drive.google.com/drive/folders/19A10kNi_DBzW-ni6dqgsARcarUYVnHPq?usp=sharing).
+
 Run inference with:
 
 ```bash
