@@ -7,6 +7,8 @@ We gratefully acknowledge the authors for making their code publicly available.
 
 https://github.com/yuanxy92/SkinSight/blob/main/Assets/skinsight_screen_recording.mp4
 
+[Video](Assets/skinsight_screen_recording.mp4)
+
 ---
 
 ## Setup, Installation & Running
